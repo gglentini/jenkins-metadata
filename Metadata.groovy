@@ -11,21 +11,18 @@ import groovy.json.JsonBuilder;
 //import groovy.json.StreamingJsonBuilder;
 
 
-//def whereTo = 'team-admin/Test-S3-Upload'
-//def whereTo = 'team-carlo/Carlo_staging-post-submit-verify-trigger'
-//def whereTo = 'team-carlo/Carlo_staging-pre-submit-verify-trigger'
-//def whereTo = 'team-carlo/carlo-full-verification-hourly-manager'
-//def whereTo = 'team-carlo/unit-lin32-rel'
-//def whereTo = 'team-traffic/Android-f8/functional-android-f8-tmc-decoder-test'
-def whereTo = build.getBuildVariables().get('JOB_TO_ANALYZE')
+/*
+def whereTo = manager.build.getBuildVariables().get('JOB_TO_ANALYZE')
 
 def job = Jenkins.instance.getItemByFullName(whereTo.toString())
 
 def buildToAnalyze = null
-if (!build.getBuildVariables().get('JOB_TO_ANALYZE_NUMBER'))
+if (!manager.build.getBuildVariables().get('JOB_TO_ANALYZE_NUMBER'))
   buildToAnalyze = job.getLastBuild()
 else
-  buildToAnalyze = job.getBuildByNumber(build.getBuildVariables().get('JOB_TO_ANALYZE_NUMBER').toInteger())
+  buildToAnalyze = job.getBuildByNumber(manager.build.getBuildVariables().get('JOB_TO_ANALYZE_NUMBER').toInteger())
+*/
+def buildToAnalyze = manager.build
 
 // map-based implementation
 /*def buildMetadata = [:]
@@ -36,22 +33,32 @@ buildMetadata['duration'] = buildToAnalyze.getDuration()
 buildMetadata['causes'] = buildToAnalyze.getCauses()
 buildMetadata['result'] = buildToAnalyze.getResult().toString()*/
 
-def getChangeSetsDetails(changes) {
+def getChangeSetsDetails(changes, parameters, env) {
   def to_return = []
-  def regex = /.*(Change-Id: )(I[a-z0-9]{40}).*/
-  changes.each { change ->
-  def items = change.getItems()
-  items.each {
-      def tmp = [:]
-      def findChangeId = (it.getMsg() =~ regex)
-      // TODO: handles exceptions instead of checks?
-      tmp['id'] = findChangeId.count !=0 ? findChangeId[0][2] : null
-      tmp['revision'] = it.getRevision() ?: it.getCommitId()
-      // TODO: improve the check on fields existance
-      tmp['serverPath'] = change.getKind() == 'repo' ? it.getServerPath() : null
-      tmp['kind'] = change.getKind()
-      to_return.add(tmp)
-    }
+  def tmp = [:]
+  if (parameters.get('GERRIT_CHANGE_ID')) {
+    tmp['id'] = parameters.get('GERRIT_CHANGE_ID')
+    tmp['revision'] = parameters.get('GERRIT_PATCHSET_REVISION')
+    tmp['repository'] = parameters.get('GERRIT_PROJECT')
+    tmp['kind'] = parameters.get('GERRIT_EVENT_TYPE')
+    to_return.add(tmp)
+  }
+  else {
+    def regex = /.*(Change-Id: )(I[a-z0-9]{40}).*/
+    changes.each { change ->
+    def items = change.getItems()
+    items.each {
+        def findChangeId = (it.getMsg() =~ regex)
+        // TODO: handles exceptions instead of checks?
+        tmp['id'] = findChangeId.count !=0 ? findChangeId[0][2] : null
+        tmp['revision'] = it.getRevision() ?: it.getCommitId()
+        // TODO: improve the check on fields existance
+        // NOTE: the current implementation supposes the VCS tool is Git, and that Jenkins Git plugin is installed
+        tmp['repository'] = change.getKind() == 'repo' ? it.getServerPath() : env.get('GIT_URL')
+        tmp['kind'] = change.getKind()
+        to_return.add(tmp)
+      }
+    }    
   }
   return to_return
 }
@@ -156,7 +163,7 @@ buildMetadata {
   
   // NOTE: the time spent in queue requires the Metrics plugin to be installed
   // TODO: add some checks, otherwise exceptions are raised if the plugin is not available
-  queuing build.getAction(jenkins.metrics.impl.TimeInQueueAction.class).getQueuingDurationMillis()
+  queuing buildToAnalyze.getAction(jenkins.metrics.impl.TimeInQueueAction.class).getQueuingDurationMillis()
   
   // see https://stackoverflow.com/questions/13992751/how-do-i-use-groovy-jsonbuilder-with-each-to-create-an-array
   causes buildToAnalyze.getCauses().collect { cause ->
@@ -172,7 +179,7 @@ buildMetadata {
   parameters buildToAnalyze.getBuildVariables()
   
   // TODO: this step currently support repo changes, not all other SCM plugins
-  changes getChangeSetsDetails(buildToAnalyze.getChangeSets())
+  changes getChangeSetsDetails(buildToAnalyze.getChangeSets(),  buildToAnalyze.getBuildVariables(), buildToAnalyze.getEnvironment(manager.listener))
   
   dowstream buildToAnalyze.getDownstreamBuilds()
   
@@ -214,29 +221,31 @@ buildMetadata {
 //println(prettyPrint(json))
 
 // print to the console log
-println(JsonOutput.prettyPrint(buildMetadata.toString()))
+//manager.listener.logger.println(JsonOutput.prettyPrint(buildMetadata.toString()))
 
 // print to a file
-def expanded = Util.replaceMacro('metadata.json', build.getEnvironment(listener))
+def expanded = Util.replaceMacro('metadata.json', manager.build.getEnvironment(manager.listener))
 
-def metadata = new FilePath(build.getWorkspace(), expanded)
+def metadata = new FilePath(manager.build.getWorkspace(), expanded)
 metadata.write(JsonOutput.prettyPrint(buildMetadata.toString()), null)
 
 // upload the file to AWS S3
 // try to use the S3 plugin, as it is already using the AWS S3 SDK
-def profile = S3BucketPublisher.getProfile()
-
 try {
-  def bucket = Util.replaceMacro('${AWS_S3_BUCKET}', build.getEnvironment(listener));
-  def storageClass = Util.replaceMacro('STANDARD', build.getEnvironment(listener));
+  // S3 plugin initialization and related data to upload files
+  def profile = S3BucketPublisher.getProfile()
+  def bucket = Util.replaceMacro('${AWS_S3_BUCKET}', manager.build.getEnvironment(manager.listener));
+  def storageClass = Util.replaceMacro('STANDARD', manager.build.getEnvironment(manager.listener));
   def region = 'us-east-1'
   int searchPathLength = (metadata.getParent().getRemote().length()) + 1
   
-  def record = profile.upload(build, listener, bucket, metadata, searchPathLength, [], storageClass, region, false, true, true, false)
+  // call the S3 plugin method
+  def record = profile.upload(manager.build, manager.listener, bucket, metadata, searchPathLength, [], storageClass, region, false, true, true, false)
 
-  println("[Build metadata action] Uploaded " + record.getName() + " to bucket " + record.getBucket() + " region " + region)
+  manager.listener.logger.println("[Build metadata action] Uploaded " + record.getName() + " to bucket " + record.getBucket() + " region " + region)
+  manager.listener.logger.println("[Build metadata action] URL: " + profile.getDownloadURL(manager.build, record))
 } 
 catch (IOException e) {
-  e.printStackTrace(listener.error("[Build metadata action] Failed to upload files to S3, marking the build as UNSTABLE"));
-    build.setResult(Result.UNSTABLE);
+  e.printStackTrace(manager.listener.error("[Build metadata action] Failed to upload build metadata file(s) to S3"));
+  //build.setResult(Result.UNSTABLE);
 }
