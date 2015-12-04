@@ -33,7 +33,7 @@ class CCIBuild {
    * out of the original one received as parameter
    */
   def CCIBuild(build, listener) {
-  	name = build.getProject().getFullName()
+    name = build.getProject().getFullName()
     number = build.getNumber()
 
     result = new DetailedResult(build.getResult().toString(),
@@ -45,7 +45,8 @@ class CCIBuild {
     timestamp = build.getTimestamp()
 
     // NOTE: the time spent in queue requires the Metrics plugin to be installed
-    queuing = getQueueDuration()
+    // otherwise it will always be null
+    queuing = getQueueDuration(build)
 
     causes = getCauses(build.getCauses())
 
@@ -60,36 +61,99 @@ class CCIBuild {
     downstreams = build.getDownstreamBuilds()
     upstreams = build.getUpstreamBuilds()
 
-    subprojects = getSubProjects(build.getAllActions())
+    //subprojects = getSubProjects(build.getAllActions())
 
-    artifacts = geAlltArtifacts()
+    artifacts = getAllArtifacts(build.getArtifacts(), build.getAction(hudson.plugins.s3.S3ArtifactsAction.class))
 
     testresult = getTestResult(build.getAllActions())
 
   }
 
-  def getQueueDuration() {
+  def getQueueDuration(build) {
     try {
-      return buildToAnalyze.getAction(
+      return build.getAction(
               jenkins.metrics.impl.TimeInQueueAction.class).getQueuingDurationMillis()
     }
-    catch {
+    catch (Exception e) {
       // [LL] - TODO: add some logging
       return null
     }
   }
+  
   // [LL] - TODO: we could create a class Cause to keep more details about a cause,
   // not only the short description
-  def getCauses(causes) {}
+  def getCauses(causes) {
+    def to_return = []
+    causes.each { cause ->
+      to_return.add(['cause': cause.getShortDescription()])
+    }
+    return to_return
+  }
 
   // [LL] - TODO: we could create a class Change to keep more details about a change
-  def getChangeSetsDetails(changes, parameters, env) {}
+  // [LL] - TODO: the implementation fits ONLY Gerrit-triggered builds currently
+  def getChangeSetsDetails(changes, parameters, env) { 
+    def to_return = []
+    def tmp = [:]
+    if (parameters.get('GERRIT_CHANGE_ID')) {
+      tmp['id'] = parameters.get('GERRIT_CHANGE_ID')
+      tmp['revision'] = parameters.get('GERRIT_PATCHSET_REVISION')
+      tmp['repository'] = parameters.get('GERRIT_PROJECT')
+      tmp['kind'] = parameters.get('GERRIT_EVENT_TYPE')
+      to_return.add(tmp)
+    }
+    return to_return
+  }
 
-  def getSubProjects(actions) {}
+  // [LL] - TODO: not working yet
+  def getSubProjects(actions) { 
+    def to_return = [ 'blocking': [], 'nonblocking': [] ]
+    // get all parametrized trigger plugin actions
+    def triggers = actions.findAll { it instanceof hudson.plugins.parameterizedtrigger.BuildInfoExporterAction }
+    // if any
+    // TODO: handles exceptions instead of checks?
+    if (triggers.size() != 0) {
+      // for each, get the blocking builds
+      triggers.each { action ->
+          // for each blocking build, get name and number
+          action.getTriggeredBuilds().each {
+            to_return['blocking'].add(['name': it.getProject().getFullName(), 'number': it.getNumber()])
+          }
+            action.getTriggeredProjects().each {
+            // TODO: it seems the number is not available in the plugin internals for non-blocking builds
+            //tmp['number'] = it.getNumber()
+            to_return['nonblocking'].add(['name': it.getFullName()])
+            }
+      }
+    }
+    return to_return
+  }
 
-  def getAllArtifacts() {}
+  def getAllArtifacts(artifacts, s3Action) { 
+    def to_return = [ 'master': [], 's3': [] ]
+    artifacts.each {
+      to_return['master'].add(it.toString())
+    }
+    if (s3Action) {
+      s3Action.getArtifacts().each {
+          to_return['s3'].add(it.getName())
+      }
+    }
+    return to_return
+  }
 
-  def getTestResult() {}
+  def getTestResult(actions) { return null }
+  
+    /**
+  * Encodes the object, returning the JSON representation (as a String object)
+    * By default, the output is not pretty-printed
+    * For a pretty-printed human-readable output (for debugging), set the 'pretty' parameter to true
+  */
+  def encode(pretty=false) {
+    def jsonBuilder = new JsonBuilder(this)
+    def encoded = pretty ? jsonBuilder.toPrettyString() : jsonBuilder.toString()
+    return encoded
+  }
 }
 
 /**
@@ -128,27 +192,27 @@ class DetailedResult {
  * Currently, it should be used to build essential reports around builds.
  */
 class BuildLightEncoder {
-	def name
-  	def number
-  	def result
+    def name
+    def number
+    def result
 
   def BuildLightEncoder() {
-  	name = null
+    name = null
     number = null
     result = null
   }
 
   def BuildLightEncoder(name, number, result) {
-  	this.name = name
+    this.name = name
     this.number = number
     this.result = result
   }
 
   /**
-	* Encodes the object, returning the JSON representation (as a String object)
+  * Encodes the object, returning the JSON representation (as a String object)
     * By default, the output is not pretty-printed
     * For a pretty-printed human-readable output (for debugging), set the 'pretty' parameter to true
-	*/
+  */
   def encode(pretty=false) {
     def jsonBuilder = new JsonBuilder(this)
     def encoded = pretty ? jsonBuilder.toPrettyString() : jsonBuilder.toString()
@@ -159,26 +223,26 @@ class BuildLightEncoder {
 
 
 // [LL] - TODO: smartly generate the jobs we are instered in, hard-coded in the 1st iteration
-//def jobsToAnalyze = ['sdk-build-ios-internal-release-all_archs', 'MOS_dal-pre-commit-verify-trigger',]
-def jobsToAnalyze = ['team-routing/server/test-acceptance-hlp.xml-only-traffic']
+def jobsToAnalyze = ['Android-iOS-sdk-pre-submit-verify-trigger', 'MOS_dal-submit-verify-trigger']
+//def jobsToAnalyze = ['team-routing/server/test-acceptance-hlp.xml-only-traffic']
 
 def cciBuilds = []
 
 jobsToAnalyze.each {
-  	def jenkinsJob = Jenkins.instance.getItemByFullName(it)
-  	//def jenkinsBuild = jenkinsJob.getLastBuild()
-    def jenkinsBuild = jenkinsJob.getBuildByNumber(14463)
+    def jenkinsJob = Jenkins.instance.getItemByFullName(it)
+    def jenkinsBuild = jenkinsJob.getLastBuild()
+    //def jenkinsBuild = jenkinsJob.getBuildByNumber(14463)
 
 
-  	// [LL] - TODO: an object for each job here, think about memory optimization
-  	def cciBuild = new BuildLightEncoder()
-    cciBuild.name = jenkinsBuild.getProject().getFullName()
-  	cciBuild.number = jenkinsBuild.getNumber()
-    cciBuild.result = new DetailedResult(jenkinsJob.getResult().toString(),
-                                          jenkinsBuild.getActions(
-      com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class))
+    // [LL] - TODO: an object for each job here, think about memory optimization
+    def cciBuild = new CCIBuild(jenkinsBuild, listener)
+    //cciBuild.name = jenkinsBuild.getProject().getFullName()
+    //cciBuild.number = jenkinsBuild.getNumber()
+    //cciBuild.result = new DetailedResult(jenkinsBuild.getResult().toString(),
+      //                                    jenkinsBuild.getActions(
+      //com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class))
 
-  	cciBuilds.add(cciBuild.encode(pretty=true))
+    cciBuilds.add(cciBuild.encode(pretty=true))
 }
 
 println cciBuilds
