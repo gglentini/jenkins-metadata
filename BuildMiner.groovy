@@ -35,9 +35,18 @@ class CCIBuild {
   def CCIBuild(build, listener) {
   	name = build.getProject().getFullName()
     number = build.getNumber()
+
+    result = new DetailedResult(build.getResult().toString(),
+                                build.getActions(
+                                  com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class))
+
     description = build.getDescription()
     duration = build.getDuration()
     timestamp = build.getTimestamp()
+
+    // NOTE: the time spent in queue requires the Metrics plugin to be installed
+    queuing = getQueueDuration()
+
     causes = getCauses(build.getCauses())
 
     // [LL] - TODO: we could create a class Node to keep more details about a node
@@ -59,6 +68,16 @@ class CCIBuild {
 
   }
 
+  def getQueueDuration() {
+    try {
+      return buildToAnalyze.getAction(
+              jenkins.metrics.impl.TimeInQueueAction.class).getQueuingDurationMillis()
+    }
+    catch {
+      // [LL] - TODO: add some logging
+      return null
+    }
+  }
   // [LL] - TODO: we could create a class Cause to keep more details about a cause,
   // not only the short description
   def getCauses(causes) {}
@@ -77,15 +96,30 @@ class CCIBuild {
  * Extended representation of build result,
  * adding information taken from the Build Failure Analyzer plugin
  */
-class CCIResult {
+class DetailedResult {
   def status
-  def cause = [:]
+  def causes = []
 
-  def CCIResult(result, failureName, failureDescription, failureCategories) {
+  // def DetailedResult(result, failureName, failureDescription, failureCategories) {
+  //   status = result
+  //   causes = [
+  //             ['name': failureName, 'description': failureDescription,
+  //               'categories': failureCategories]
+  //            ]
+  //   //cause['name'] = failureName
+  //   //cause['description'] = failureDescription
+  //   //cause['categories'] = failureCategories
+  // }
+
+  def DetailedResult(result, bfaActions) {
     status = result
-    cause['name'] = failureName
-    cause['description'] = failureDescription
-    cause['categories'] = failureCategories
+    bfaActions.each {
+      it.getFoundFailureCauses().each {
+        causes.add(['name': it.getName(),
+                    'description': it.getDescription(),
+                    'categories': it.getCategories()])
+      }
+    }
   }
 }
 
@@ -101,7 +135,7 @@ class BuildLightEncoder {
   def BuildLightEncoder() {
   	name = null
     number = null
-    result = []
+    result = null
   }
 
   def BuildLightEncoder(name, number, result) {
@@ -138,18 +172,11 @@ jobsToAnalyze.each {
 
   	// [LL] - TODO: an object for each job here, think about memory optimization
   	def cciBuild = new BuildLightEncoder()
-	cciBuild.name = jenkinsBuild.getProject().getFullName()
+    cciBuild.name = jenkinsBuild.getProject().getFullName()
   	cciBuild.number = jenkinsBuild.getNumber()
-  	def BFAActions = jenkinsBuild.getActions(
-      com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class)
-  	BFAActions.each {
-      it.getFoundFailureCauses().each {
-        def bfaResult = new CCIResult(jenkinsBuild.getResult().toString(),
-                                      it.getName(), it.getDescription(), it.getCategories())
-      	cciBuild.result.add(bfaResult)
-      }
-  	}
-
+    cciBuild.result = new DetailedResult(jenkinsJob.getResult().toString(),
+                                          jenkinsBuild.getActions(
+      com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class))
 
   	cciBuilds.add(cciBuild.encode(pretty=true))
 }
