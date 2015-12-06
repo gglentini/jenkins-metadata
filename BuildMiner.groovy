@@ -1,5 +1,9 @@
 import jenkins.model.Jenkins;
 
+//import hudson.plugins.parameterizedtrigger.BuildInfoExporterAction;
+
+//import com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction;
+
 import groovy.json.JsonOutput;
 import groovy.json.JsonBuilder;
 
@@ -15,17 +19,14 @@ class CCIBuild {
   def duration
   def timestamp
   def queuing
-  def causes
+  def causes = []
   def node
   def parameters
   def changes
   def downstreams
   def upstreams
-  //def blocking
-  //def nonblocking
-  def subprojects
-  def artifacts
-  //def s3artifacts
+  def subprojects = []
+  def artifacts = []
   def testresult
 
   /**
@@ -36,9 +37,7 @@ class CCIBuild {
     name = build.getProject().getFullName()
     number = build.getNumber()
 
-    result = new DetailedResult(build.getResult().toString(),
-                                build.getActions(
-                                  com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class))
+    result = new DetailedResult(build)
 
     description = build.getDescription()
     duration = build.getDuration()
@@ -61,11 +60,13 @@ class CCIBuild {
     downstreams = build.getDownstreamBuilds()
     upstreams = build.getUpstreamBuilds()
 
-    //subprojects = getSubProjects(build.getAllActions())
+     // NOTE: the time spent in queue requires the Parameterized trigger plugin to be installed
+    // otherwise it will always be an empty list
+    subprojects = getSubProjects(build)
 
-    artifacts = getAllArtifacts(build.getArtifacts(), build.getAction(hudson.plugins.s3.S3ArtifactsAction.class))
+    artifacts = getAllArtifacts(build)
 
-    testresult = getTestResult(build.getAllActions())
+    testresult = getTestResult(build)
 
   }
 
@@ -79,20 +80,20 @@ class CCIBuild {
       return null
     }
   }
-  
+
   // [LL] - TODO: we could create a class Cause to keep more details about a cause,
   // not only the short description
   def getCauses(causes) {
     def to_return = []
     causes.each { cause ->
-      to_return.add(['cause': cause.getShortDescription()])
+      to_return.add(cause)
     }
     return to_return
   }
 
   // [LL] - TODO: we could create a class Change to keep more details about a change
   // [LL] - TODO: the implementation fits ONLY Gerrit-triggered builds currently
-  def getChangeSetsDetails(changes, parameters, env) { 
+  def getChangeSetsDetails(changes, parameters, env) {
     def to_return = []
     def tmp = [:]
     if (parameters.get('GERRIT_CHANGE_ID')) {
@@ -105,14 +106,19 @@ class CCIBuild {
     return to_return
   }
 
-  // [LL] - TODO: not working yet
-  def getSubProjects(actions) { 
+  def getSubProjects(build) {
     def to_return = [ 'blocking': [], 'nonblocking': [] ]
+    def triggers
+
     // get all parametrized trigger plugin actions
-    def triggers = actions.findAll { it instanceof hudson.plugins.parameterizedtrigger.BuildInfoExporterAction }
+    try {
+      triggers = build.getActions(hudson.plugins.parameterizedtrigger.BuildInfoExporterAction)
+    }
+    catch (Exception e) {
+      return to_return
+    }
+
     // if any
-    // TODO: handles exceptions instead of checks?
-    if (triggers.size() != 0) {
       // for each, get the blocking builds
       triggers.each { action ->
           // for each blocking build, get name and number
@@ -125,29 +131,58 @@ class CCIBuild {
             to_return['nonblocking'].add(['name': it.getFullName()])
             }
       }
-    }
     return to_return
   }
 
-  def getAllArtifacts(artifacts, s3Action) { 
+  def getAllArtifacts(build) {
     def to_return = [ 'master': [], 's3': [] ]
-    artifacts.each {
+    def s3Action
+
+    build.getArtifacts().each {
       to_return['master'].add(it.toString())
+    }
+
+    try {
+      s3Action = build.getAction(hudson.plugins.s3.S3ArtifactsAction.class)
+    }
+    catch (Exception e ) {
+      return to_return
     }
     if (s3Action) {
       s3Action.getArtifacts().each {
-          to_return['s3'].add(it.getName())
+      to_return['s3'].add(it.getName())
       }
     }
     return to_return
   }
 
-  def getTestResult(actions) { return null }
-  
-    /**
+  def getTestResult(build) {
+    def to_return = []
+    // get all test actions
+    try {
+      def testPublishers = build.getActions(
+        hudson.tasks.test.AbstractTestResultAction.AbstractTestResultAction.class)
+    }
+    catch (Exception e) {
+      return to_return
+    }
+      testPublishers.each {
+        def tmp = [:]
+        tmp['framework'] = it.getResult().getName()
+        tmp['duration'] = it.getResult().getDuration()
+        tmp['pass'] = it.getResult().getPassCount()
+        tmp['fail'] = it.getResult().getFailCount()
+        tmp['skip'] = it.getResult().getSkipCount()
+
+        to_return.add(tmp)
+      }
+    return to_return
+  }
+
+ /**
   * Encodes the object, returning the JSON representation (as a String object)
-    * By default, the output is not pretty-printed
-    * For a pretty-printed human-readable output (for debugging), set the 'pretty' parameter to true
+  * By default, the output is not pretty-printed
+  * For a pretty-printed human-readable output (for debugging), set the 'pretty' parameter to true
   */
   def encode(pretty=false) {
     def jsonBuilder = new JsonBuilder(this)
@@ -175,8 +210,24 @@ class DetailedResult {
   //   //cause['categories'] = failureCategories
   // }
 
-  def DetailedResult(result, bfaActions) {
+  def DetailedResult(build) {
+      this(build.getResult().toString(), build.getAllActions())
+    						//com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction)
+                        //)
+  }
+
+  def DetailedResult(result, actions) {
     status = result
+    def bfaActions
+    try {
+      bfaActions = actions.findAll {
+        it.class == com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class
+      }
+    }
+    catch (Exception e) {
+      return
+    }
+
     bfaActions.each {
       it.getFoundFailureCauses().each {
         causes.add(['name': it.getName(),
@@ -209,9 +260,9 @@ class BuildLightEncoder {
   }
 
   /**
-  * Encodes the object, returning the JSON representation (as a String object)
-    * By default, the output is not pretty-printed
-    * For a pretty-printed human-readable output (for debugging), set the 'pretty' parameter to true
+   * Encodes the object, returning the JSON representation (as a String object)
+   * By default, the output is not pretty-printed
+   * For a pretty-printed human-readable output (for debugging), set the 'pretty' parameter to true
   */
   def encode(pretty=false) {
     def jsonBuilder = new JsonBuilder(this)
@@ -223,8 +274,9 @@ class BuildLightEncoder {
 
 
 // [LL] - TODO: smartly generate the jobs we are instered in, hard-coded in the 1st iteration
-def jobsToAnalyze = ['Android-iOS-sdk-pre-submit-verify-trigger', 'MOS_dal-submit-verify-trigger']
+//def jobsToAnalyze = ['Android-iOS-sdk-pre-submit-verify-trigger', 'MOS_dal-submit-verify-trigger']
 //def jobsToAnalyze = ['team-routing/server/test-acceptance-hlp.xml-only-traffic']
+def jobsToAnalyze = ['parent',]
 
 def cciBuilds = []
 
