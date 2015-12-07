@@ -1,9 +1,5 @@
 import jenkins.model.Jenkins;
 
-//import hudson.plugins.parameterizedtrigger.BuildInfoExporterAction;
-
-//import com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction;
-
 import groovy.json.JsonOutput;
 import groovy.json.JsonBuilder;
 
@@ -83,10 +79,12 @@ class CCIBuild {
 
   // [LL] - TODO: we could create a class Cause to keep more details about a cause,
   // not only the short description
+  // We can't simply encode each cause, because some of them (e.g. upstream trigger) is not a simple object
+  // but it has nested objects (e.g. build, run) inside it
   def getCauses(causes) {
     def to_return = []
     causes.each { cause ->
-      to_return.add(cause)
+      to_return.add(cause.getShortDescription())
     }
     return to_return
   }
@@ -119,18 +117,20 @@ class CCIBuild {
     }
 
     // if any
-      // for each, get the blocking builds
-      triggers.each { action ->
-          // for each blocking build, get name and number
-          action.getTriggeredBuilds().each {
+    // for each, get the blocking builds
+    triggers.each { action ->
+        // for each blocking build, get name and number
+        action.getTriggeredBuilds().each {
+          if (it) // need to add this check, as children job can be deleted 
             to_return['blocking'].add(['name': it.getProject().getFullName(), 'number': it.getNumber()])
-          }
-            action.getTriggeredProjects().each {
-            // TODO: it seems the number is not available in the plugin internals for non-blocking builds
-            //tmp['number'] = it.getNumber()
+        }
+        action.getTriggeredProjects().each {
+          // TODO: it seems the number is not available in the plugin internals for non-blocking builds
+          //tmp['number'] = it.getNumber()
+          if (it)
             to_return['nonblocking'].add(['name': it.getFullName()])
-            }
-      }
+        }
+    }
     return to_return
   }
 
@@ -158,10 +158,11 @@ class CCIBuild {
 
   def getTestResult(build) {
     def to_return = []
+    def testPublishers
     // get all test actions
     try {
-      def testPublishers = build.getActions(
-        hudson.tasks.test.AbstractTestResultAction.AbstractTestResultAction.class)
+      testPublishers = build.getActions(
+        hudson.tasks.test.AbstractTestResultAction.class)
     }
     catch (Exception e) {
       return to_return
@@ -199,21 +200,9 @@ class DetailedResult {
   def status
   def causes = []
 
-  // def DetailedResult(result, failureName, failureDescription, failureCategories) {
-  //   status = result
-  //   causes = [
-  //             ['name': failureName, 'description': failureDescription,
-  //               'categories': failureCategories]
-  //            ]
-  //   //cause['name'] = failureName
-  //   //cause['description'] = failureDescription
-  //   //cause['categories'] = failureCategories
-  // }
 
   def DetailedResult(build) {
       this(build.getResult().toString(), build.getAllActions())
-    						//com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction)
-                        //)
   }
 
   def DetailedResult(result, actions) {
@@ -269,32 +258,4 @@ class BuildLightEncoder {
     def encoded = pretty ? jsonBuilder.toPrettyString() : jsonBuilder.toString()
     return encoded
   }
-
 }
-
-
-// [LL] - TODO: smartly generate the jobs we are instered in, hard-coded in the 1st iteration
-//def jobsToAnalyze = ['Android-iOS-sdk-pre-submit-verify-trigger', 'MOS_dal-submit-verify-trigger']
-//def jobsToAnalyze = ['team-routing/server/test-acceptance-hlp.xml-only-traffic']
-def jobsToAnalyze = ['parent',]
-
-def cciBuilds = []
-
-jobsToAnalyze.each {
-    def jenkinsJob = Jenkins.instance.getItemByFullName(it)
-    def jenkinsBuild = jenkinsJob.getLastBuild()
-    //def jenkinsBuild = jenkinsJob.getBuildByNumber(14463)
-
-
-    // [LL] - TODO: an object for each job here, think about memory optimization
-    def cciBuild = new CCIBuild(jenkinsBuild, listener)
-    //cciBuild.name = jenkinsBuild.getProject().getFullName()
-    //cciBuild.number = jenkinsBuild.getNumber()
-    //cciBuild.result = new DetailedResult(jenkinsBuild.getResult().toString(),
-      //                                    jenkinsBuild.getActions(
-      //com.sonyericsson.jenkins.plugins.bfa.model.FailureCauseBuildAction.class))
-
-    cciBuilds.add(cciBuild.encode(pretty=true))
-}
-
-println cciBuilds
