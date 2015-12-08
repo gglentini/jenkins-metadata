@@ -169,11 +169,13 @@ class CCIBuild {
     }
       testPublishers.each {
         def tmp = [:]
-        tmp['framework'] = it.getResult().getName()
-        tmp['duration'] = it.getResult().getDuration()
-        tmp['pass'] = it.getResult().getPassCount()
-        tmp['fail'] = it.getResult().getFailCount()
-        tmp['skip'] = it.getResult().getSkipCount()
+        // [LL] - TODO: retrieving AbstractTestResultAction info only,
+        // as each TestResult could have different implementations
+        //tmp['framework'] = it.getResult().getName()
+        tmp['name'] = it.getDisplayName()
+        tmp['total'] = it.getTotalCount()
+        tmp['fail'] = it.getFailCount()
+        tmp['skip'] = it.getSkipCount()
 
         to_return.add(tmp)
       }
